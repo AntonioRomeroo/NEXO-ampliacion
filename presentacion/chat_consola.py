@@ -1,11 +1,12 @@
 from dominio.excepciones import ErrorAgente, LimiteContextoSuperado
+from dominio.modelo_llm import ModeloLLM
 from dominio.modelos import ModeloEco, ModeloReglas
 
 
 class ChatConsola:
     """Capa de presentación: lee, delega en el agente y muestra."""
 
-    MODELOS = {"eco": ModeloEco, "reglas": ModeloReglas}
+    MODELOS = {"eco": ModeloEco, "reglas": ModeloReglas, "llm": ModeloLLM}
 
     # Recibe el agente y lo opcional; entrada y salida se pueden cambiar en las pruebas.
     def __init__(self, agente, repositorio=None, registro_uso=None,
@@ -88,11 +89,11 @@ class ChatConsola:
         for linea in self._agente.listar_herramientas():
             self._salida(linea)
 
-    # /modelo eco|reglas: cambia de modelo.
+    # /modelo eco|reglas|llm: cambia de modelo.
     def _cmd_modelo(self, argumento):
         clase = self.MODELOS.get(argumento.lower())
         if clase is None:
-            self._salida("Uso: /modelo eco | /modelo reglas")
+            self._salida("Uso: /modelo eco | /modelo reglas | /modelo llm")
             return
         self._agente.cambiar_modelo(clase())
         self._salida(f"✔ Modelo cambiado a {clase.__name__}")

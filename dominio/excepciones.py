@@ -16,3 +16,11 @@ class LimiteContextoSuperado(ErrorAgente):
 
 class ErrorPersistencia(ErrorAgente):
     """Fallo al guardar o leer datos en disco (JSON/CSV)."""
+
+
+class PeticionInvalida(ErrorAgente):
+    """La petición al modelo no es válida (mensajes, max_tokens o temperature)."""
+
+
+class ErrorLLM(ErrorAgente):
+    """Fallo al hablar con el servicio del LLM (red, servidor o respuesta rara)."""

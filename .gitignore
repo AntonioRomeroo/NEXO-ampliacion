@@ -1,6 +1,7 @@
-.DS_Store
 .venv/
+datos/
 __pycache__/
 .pytest_cache/
-datos/
+.DS_Store
+
 .env
