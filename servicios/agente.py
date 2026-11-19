@@ -3,6 +3,7 @@ import time
 from dominio.excepciones import (
     ArgumentosInvalidos,
     ErrorAgente,
+    ErrorPersistencia,
     HerramientaNoEncontrada,
 )
 from dominio.mensaje import Conversacion, Mensaje
@@ -21,6 +22,7 @@ class Agente:
         self._registro_tokens = registro_tokens
         self.conversacion = Conversacion()
         self._llamadas = []
+        self._aviso = None
 
     # Copia de las herramientas llamadas en el último turno (solo lectura).
     @property
@@ -28,10 +30,16 @@ class Agente:
         """Llamadas (nombre, argumentos) hechas en el último turno."""
         return list(self._llamadas)
 
+    # Aviso del último turno (por ejemplo, que no se pudo escribir un registro); None si todo fue bien.
+    @property
+    def aviso(self):
+        return self._aviso
+
     # Bucle principal: el modelo responde o pide una herramienta, como máximo 3 vueltas.
     def procesar(self, texto_usuario) -> str:
         self.conversacion.agregar(Mensaje("usuario", texto_usuario))
         self._llamadas = []
+        self._aviso = None
         herramientas = list(self._herramientas.values())
 
         for _ in range(self.MAX_ITERACIONES):
@@ -73,13 +81,20 @@ class Agente:
     def _registrar(self, nombre, argumentos, exito, inicio):
         if self._registro is not None:
             milisegundos = (time.perf_counter() - inicio) * 1000
-            self._registro.registrar(nombre, argumentos, exito, milisegundos)
+            self._anotar(lambda: self._registro.registrar(nombre, argumentos, exito, milisegundos))
+
+    # Ejecuta un registro; si falla (por ejemplo, CSV abierto en Excel), deja un aviso y la respuesta no se pierde.
+    def _anotar(self, registrar):
+        try:
+            registrar()
+        except ErrorPersistencia as e:
+            self._aviso = str(e)
 
     # Si el modelo informa de sus tokens (el LLM sí, los demás no), los anota con el coste.
     def _registrar_tokens(self, pregunta):
         uso = getattr(self.modelo, "ultimo_uso", None)
         if self._registro_tokens is not None and uso:
-            self._registro_tokens.registrar(pregunta, uso["tokens_entrada"], uso["tokens_salida"])
+            self._anotar(lambda: self._registro_tokens.registrar(pregunta, uso["tokens_entrada"], uso["tokens_salida"]))
 
     # Devuelve el texto de cada herramienta para el comando /herramientas.
     def listar_herramientas(self) -> list[str]:

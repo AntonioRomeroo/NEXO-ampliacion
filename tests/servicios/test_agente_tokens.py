@@ -1,7 +1,8 @@
+from dominio.excepciones import ErrorPersistencia
 from dominio.modelos import Respuesta
 from persistencia.registro_tokens import RegistroTokens
 from servicios.agente import Agente
-from tests.ayudantes import crear_agente
+from tests.ayudantes import crear_agente, ejecutar_chat
 
 
 class ModeloConTokens:
@@ -30,3 +31,32 @@ def test_un_modelo_sin_tokens_no_escribe_nada(tmp_path):
 
 def test_sin_registro_de_tokens_todo_sigue_igual():
     assert Agente(ModeloConTokens(), []).procesar("hola") == "vale"
+
+
+class RegistroRoto:
+    def registrar(self, *args):
+        raise ErrorPersistencia("archivo bloqueado")
+
+
+def test_si_falla_el_registro_de_tokens_la_respuesta_no_se_pierde():
+    agente = Agente(ModeloConTokens(), [], registro_tokens=RegistroRoto())
+    assert agente.procesar("hola") == "vale"
+    assert "bloqueado" in agente.aviso
+
+
+def test_si_falla_el_registro_de_herramientas_la_respuesta_no_se_pierde():
+    agente = crear_agente(RegistroRoto())
+    assert "4" in agente.procesar("2 + 2")
+    assert "bloqueado" in agente.aviso
+
+
+def test_el_aviso_se_borra_en_el_turno_siguiente():
+    agente = crear_agente(RegistroRoto())
+    agente.procesar("2 + 2")
+    agente.procesar("hola")  # no usa herramientas: no hay nada que registrar
+    assert agente.aviso is None
+
+
+def test_el_chat_muestra_el_aviso_y_sigue_abierto():
+    salida = ejecutar_chat(["2 + 2", "hola", "/salir"], crear_agente(RegistroRoto()))
+    assert "NEXO > " in salida and "⚠ archivo bloqueado" in salida and "¡Hola!" in salida

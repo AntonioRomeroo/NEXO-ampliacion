@@ -71,6 +71,8 @@ class ChatConsola:
         if self._agente.conversacion.veces_resumida > resumida_antes:
             self._salida("🗜 He resumido los mensajes antiguos para no superar el límite de tokens")
         self._salida(f"NEXO > {respuesta}")
+        if self._agente.aviso:
+            self._salida(f"⚠ {self._agente.aviso}")
 
     # Separa el comando de su argumento y llama a la función que le toca.
     def _ejecutar_comando(self, texto):
