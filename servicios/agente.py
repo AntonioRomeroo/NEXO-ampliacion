@@ -14,10 +14,11 @@ class Agente:
     MAX_ITERACIONES = 3
 
     # Recibe el modelo y las herramientas, y crea una conversación nueva.
-    def __init__(self, modelo, herramientas, registro_uso=None):
+    def __init__(self, modelo, herramientas, registro_uso=None, registro_tokens=None):
         self.modelo = modelo
         self._herramientas = {h.nombre: h for h in herramientas}
         self._registro = registro_uso
+        self._registro_tokens = registro_tokens
         self.conversacion = Conversacion()
         self._llamadas = []
 
@@ -35,6 +36,7 @@ class Agente:
 
         for _ in range(self.MAX_ITERACIONES):
             respuesta = self.modelo.responder(self.conversacion, herramientas)
+            self._registrar_tokens(texto_usuario)
             if not respuesta.es_llamada_herramienta():
                 texto = respuesta.texto or ""
                 self.conversacion.agregar(Mensaje("asistente", texto))
@@ -72,6 +74,12 @@ class Agente:
         if self._registro is not None:
             milisegundos = (time.perf_counter() - inicio) * 1000
             self._registro.registrar(nombre, argumentos, exito, milisegundos)
+
+    # Si el modelo informa de sus tokens (el LLM sí, los demás no), los anota con el coste.
+    def _registrar_tokens(self, pregunta):
+        uso = getattr(self.modelo, "ultimo_uso", None)
+        if self._registro_tokens is not None and uso:
+            self._registro_tokens.registrar(pregunta, uso["tokens_entrada"], uso["tokens_salida"])
 
     # Devuelve el texto de cada herramienta para el comando /herramientas.
     def listar_herramientas(self) -> list[str]:
