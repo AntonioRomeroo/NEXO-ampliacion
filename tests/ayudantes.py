@@ -13,7 +13,7 @@ def crear_agente(registro=None):
     return Agente(ModeloReglas(), [Calculadora(), ConversorMoneda(), BuscadorFAQ()], registro)
 
 
-def ejecutar_chat(entradas, agente, repo=None, registro=None):
+def ejecutar_chat(entradas, agente, repo=None, registro=None, transcripcion=None):
     """Runs ChatConsola with scripted input and returns everything it printed."""
     cola, salida = iter(entradas), []
 
@@ -23,5 +23,6 @@ def ejecutar_chat(entradas, agente, repo=None, registro=None):
         except StopIteration:
             raise EOFError
 
-    ChatConsola(agente, repo, registro, entrada=entrada, salida=salida.append).iniciar()
+    ChatConsola(agente, repo, registro, entrada=entrada, salida=salida.append,
+                transcripcion=transcripcion).iniciar()
     return "\n".join(salida)

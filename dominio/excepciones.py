@@ -24,3 +24,7 @@ class PeticionInvalida(ErrorAgente):
 
 class ErrorLLM(ErrorAgente):
     """Fallo al hablar con el servicio del LLM (red, servidor o respuesta rara)."""
+
+
+class ErrorTranscripcion(ErrorAgente):
+    """Fallo al pasar un audio a texto (archivo no válido, modelo no disponible o sin voz)."""

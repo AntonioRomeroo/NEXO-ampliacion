@@ -2,7 +2,10 @@ from dotenv import load_dotenv
 
 from dominio.herramientas import Calculadora, ConversorMoneda, BuscadorFAQ
 from dominio.modelos import ModeloReglas
+from dominio.transcriptor import TranscriptorLocal
 from servicios.agente import Agente
+from servicios.servicio_transcripcion import ServicioTranscripcion
+from persistencia.registro_transcripciones import RegistroTranscripciones
 from persistencia.repositorio_conversaciones import RepositorioConversaciones
 from persistencia.registro_tokens import RegistroTokens
 from persistencia.registro_uso import RegistroUso
@@ -13,4 +16,5 @@ if __name__ == "__main__":
     herramientas = [Calculadora(), ConversorMoneda(), BuscadorFAQ()]
     registro = RegistroUso("datos/uso.csv")
     agente = Agente(ModeloReglas(), herramientas, registro, RegistroTokens())
-    ChatConsola(agente, RepositorioConversaciones(), registro).iniciar()
+    transcripcion = ServicioTranscripcion(TranscriptorLocal(), RegistroTranscripciones())
+    ChatConsola(agente, RepositorioConversaciones(), registro, transcripcion=transcripcion).iniciar()

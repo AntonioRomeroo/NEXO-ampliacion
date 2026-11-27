@@ -10,8 +10,9 @@ class ChatConsola:
 
     # Recibe el agente y lo opcional; entrada y salida se pueden cambiar en las pruebas.
     def __init__(self, agente, repositorio=None, registro_uso=None,
-                 entrada=input, salida=print):
+                 entrada=input, salida=print, transcripcion=None):
         self._agente = agente
+        self._transcripcion = transcripcion
         self._repositorio = repositorio
         self._registro = registro_uso
         self._entrada = entrada
@@ -27,6 +28,7 @@ class ChatConsola:
             "/lista": self._cmd_lista,
             "/nueva": self._cmd_nueva,
             "/stats": self._cmd_stats,
+            "/transcribir": self._cmd_transcribir,
         }
 
     # Bucle del chat: lee, ejecuta un comando o una pregunta y muestra los errores sin cerrarse.
@@ -172,3 +174,23 @@ class ChatConsola:
         for herramienta, usos in resumen["usos"].items():
             fallos = resumen["fallos"].get(herramienta, 0)
             self._salida(f"  - {herramienta}: {usos} usos, {fallos} fallos")
+        audio = self._transcripcion.resumen() if self._transcripcion is not None else None
+        if audio and audio["transcripciones"]:
+            self._salida(f"🎙 Transcripciones: {audio['transcripciones']} "
+                         f"({audio['segundos_audio']:.1f} s de audio)")
+
+    # /transcribir <archivo>: pasa el audio a texto y se lo envía a NEXO como si lo hubieras escrito.
+    def _cmd_transcribir(self, argumento):
+        if self._transcripcion is None:
+            self._salida("⚠ La transcripción no está disponible.")
+            return
+        ruta = argumento.strip("\"'")  # al arrastrar un archivo a la terminal suele llegar entre comillas
+        if not ruta:
+            self._salida("Uso: /transcribir <archivo de audio>")
+            return
+        self._salida("🎙 Transcribiendo... (la primera vez puede tardar mientras se descarga el modelo)")
+        texto = self._transcripcion.transcribir(ruta)
+        self._salida(f"🎙 Transcripción: {texto}")
+        if self._transcripcion.aviso:
+            self._salida(f"⚠ {self._transcripcion.aviso}")
+        self._responder(texto)

@@ -1,8 +1,10 @@
 import json
+import tempfile
 import time
 import uuid
+from pathlib import Path
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -21,7 +23,7 @@ def _texto(contenido):
 
 
 # Crea la app web: habla el formato de OpenAI para que cualquier frontend la entienda.
-def crear_app(agente):
+def crear_app(agente, transcripcion=None):
     app = FastAPI(title="NEXO")
     # CORS: sin esto el navegador bloquea las llamadas desde un index.html abierto en local.
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -62,6 +64,22 @@ def crear_app(agente):
             "choices": [{"index": 0, "message": {"role": "assistant", "content": texto},
                          "finish_reason": "stop"}],
         }
+
+    # Transcribe un audio (mismo formato que la API de OpenAI: multipart con el campo "file").
+    @app.post("/v1/audio/transcriptions")
+    def transcribir(file: UploadFile = File(...)):
+        if transcripcion is None:
+            return error(501, "La transcripción no está disponible")
+        # Se guarda con su nombre original (sin carpetas) para que el registro y la extensión sean correctos.
+        nombre = Path(file.filename or "audio").name
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = Path(carpeta) / nombre
+            ruta.write_bytes(file.file.read())
+            try:
+                texto = transcripcion.transcribir(ruta)
+            except ErrorAgente as e:
+                return error(400, str(e))
+        return {"text": texto}
 
     return app
 

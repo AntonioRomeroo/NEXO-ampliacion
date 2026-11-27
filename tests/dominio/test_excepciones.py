@@ -3,7 +3,8 @@ import pytest
 from dominio import excepciones
 
 PROPIAS = [excepciones.HerramientaNoEncontrada, excepciones.ArgumentosInvalidos,
-           excepciones.LimiteContextoSuperado, excepciones.ErrorPersistencia]
+           excepciones.LimiteContextoSuperado, excepciones.ErrorPersistencia,
+           excepciones.ErrorTranscripcion]
 
 
 @pytest.mark.parametrize("clase", PROPIAS)

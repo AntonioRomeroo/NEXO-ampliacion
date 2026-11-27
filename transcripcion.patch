@@ -1,0 +1,858 @@
+diff --git a/.env.example b/.env.example
+index 5caa499..117d312 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,3 +4,5 @@ LLM_MODEL=llama3
+ LLM_BASE_URL=http://localhost:11434/v1
+ # Modelo que usa la API web (python web.py): reglas, eco o llm
+ NEXO_MODELO=reglas
++# Modelo de transcripción de audio (faster-whisper): tiny, base, small... Más grande = más preciso y más lento
++STT_MODELO=base
+diff --git a/README.md b/README.md
+index 6fd4e0e..db6808a 100644
+--- a/README.md
++++ b/README.md
+@@ -6,12 +6,12 @@ Agente de IA en Python con arquitectura por capas. Tiene tres modelos: `ModeloEc
+ 
+ ```bash
+ python3 -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts\activate
+-pip install -r requirements.txt   # pytest, httpx, fastapi, uvicorn, python-dotenv
++pip install -r requirements.txt   # pytest, httpx, fastapi, uvicorn, python-dotenv, python-multipart, faster-whisper
+ cp .env.example .env              # y rellena tus datos (ver "Configuración del LLM")
+ python main.py                    # chat por consola
+ python web.py                     # API web en http://127.0.0.1:8000 (para el frontend)
+ python comparar_modelos.py        # compara ModeloReglas y ModeloLLM con 10 preguntas
+-pytest                            # pruebas (106; no necesitan LLM ni internet)
++pytest                            # pruebas (146; no necesitan LLM, internet ni audio real)
+ ```
+ 
+ `main.py`, `web.py` y `comparar_modelos.py` se ejecutan desde la raíz del proyecto. Sin LLM, el chat y la API funcionan igual con `ModeloReglas`.
+@@ -21,9 +21,9 @@ pytest                            # pruebas (106; no necesitan LLM ni internet)
+ | Capa | Archivos |
+ |---|---|
+ | Presentación | `presentacion/chat_consola.py`, `presentacion/api_web.py` |
+-| Servicios | `servicios/agente.py` |
+-| Dominio | `dominio/excepciones.py`, `mensaje.py`, `herramientas.py`, `modelos.py`, `modelo_llm.py` |
+-| Persistencia | `persistencia/repositorio_conversaciones.py`, `registro_uso.py`, `registro_tokens.py` |
++| Servicios | `servicios/agente.py`, `servicios/servicio_transcripcion.py` |
++| Dominio | `dominio/excepciones.py`, `mensaje.py`, `herramientas.py`, `modelos.py`, `modelo_llm.py`, `transcriptor.py` |
++| Persistencia | `persistencia/repositorio_conversaciones.py`, `registro_uso.py`, `registro_tokens.py`, `registro_transcripciones.py` |
+ | Conexión | `main.py` (consola) y `web.py` (API web): los únicos sitios donde se unen las piezas |
+ | Script | `comparar_modelos.py` (compara dos modelos con 10 preguntas) |
+ 
+@@ -41,7 +41,8 @@ No hay `print()` ni `input()` en `dominio/` ni `servicios/` (lo verifica una pru
+ | `/cargar <id>` | Restaura una conversación completa en el agente |
+ | `/lista` | Conversaciones guardadas |
+ | `/nueva` | Nueva conversación (con id nuevo; las guardadas no se tocan) |
+-| `/stats` | Resumen del registro de uso |
++| `/stats` | Resumen del registro de uso (y de las transcripciones, si hay) |
++| `/transcribir <archivo>` | Pasa un audio a texto y se lo envía a NEXO como si lo hubieras escrito |
+ | `/salir` | Termina |
+ 
+ Los errores (`ErrorAgente` y derivadas, o cualquier fallo inesperado) se muestran como mensaje y el chat sigue abierto.
+@@ -97,6 +98,22 @@ fecha,pregunta,tokens_entrada,tokens_salida,coste
+ ```
+ (78 × 0,008 / 1000 = 0,000624 €.)
+ 
++### Transcripción de audio (`dominio/transcriptor.py`)
++Permite hablarle a NEXO con un archivo de audio (`.wav`, `.mp3`, `.m4a`, `.ogg`, `.flac`, `.webm`). **El `Agente` no cambió**: la transcripción ocurre antes y el texto entra como una pregunta normal.
++
++- `Transcriptor` es la clase base (como `Modelo`). `TranscriptorLocal` hereda de ella y usa **faster-whisper** en tu ordenador: sin clave, sin coste y sin internet (salvo la primera vez, que descarga el modelo). Para añadir una API de pago bastaría otra hija, por ejemplo `TranscriptorAPI`.
++- **Validación** antes de cargar el modelo: el archivo existe, el formato es válido y no está vacío. Si el audio no tiene voz, también da error. Todo lanza `ErrorTranscripcion` (hija de `ErrorAgente`), así que el chat lo muestra y sigue abierto.
++- El modelo se **carga la primera vez que se usa**, no al arrancar, y `faster-whisper` solo se importa en ese momento. Se elige con `STT_MODELO` en el `.env` (`tiny`, `base`, `small`...; por defecto `base`).
++- `ServicioTranscripcion` (capa de servicios) transcribe y anota cada audio en `datos/transcripciones.csv` (`fecha,archivo,segundos_audio,milisegundos,caracteres`). Si el CSV falla, deja un `aviso` y el texto no se pierde. Lo usan el chat y la API.
++- **Consola:** `/transcribir ruta/al/audio.wav` muestra el texto (`🎙 Transcripción: ...`) y NEXO responde.
++- **API web:** `POST /v1/audio/transcriptions` (formato de OpenAI: multipart con el campo `file`) devuelve `{"text": "..."}`.
++
++```bash
++curl -X POST localhost:8000/v1/audio/transcriptions -F "file=@pregunta.wav"
++# → {"text":"cuánto tarda el envío"}
++```
++- **Limitaciones:** solo archivos (no micrófono en directo). `ModeloReglas` entiende cifras (`2 + 2`), pero Whisper suele escribir los números con letras («dos más dos»), así que con audios de cálculos funciona mejor `ModeloLLM`. Los tests usan un Whisper falso: no necesitan el modelo ni audios reales.
++
+ ### Frontend web
+ `web.py` arranca una API (`presentacion/api_web.py`, FastAPI) que habla el formato de OpenAI: `POST /v1/chat/completions` y `GET /v1/models`. Por eso sirve casi cualquier frontend de chat.
+ 
+@@ -157,10 +174,10 @@ La carpeta `tests/` replica la estructura del proyecto:
+ 
+ ```
+ tests/
+-├── dominio/        test_excepciones · test_mensaje · test_herramientas · test_modelos · test_modelo_llm
+-├── servicios/      test_agente · test_agente_tokens
+-├── persistencia/   test_repositorio_conversaciones · test_registro_uso · test_registro_tokens
+-├── presentacion/   test_chat_consola · test_api_web
++├── dominio/        test_excepciones · test_mensaje · test_herramientas · test_modelos · test_modelo_llm · test_transcriptor
++├── servicios/      test_agente · test_agente_tokens · test_servicio_transcripcion
++├── persistencia/   test_repositorio_conversaciones · test_registro_uso · test_registro_tokens · test_registro_transcripciones
++├── presentacion/   test_chat_consola · test_api_web · test_chat_transcripcion · test_api_transcripcion
+ ├── test_main.py          ← main.py (ciclo real guardar → cerrar → reabrir → cargar)
+ ├── test_comparar_modelos.py  ← el script de comparación, con un LLM falso
+ ├── test_arquitectura.py  ← reglas globales: sin print/input en dominio/servicios, sin isinstance en el agente
+diff --git a/dominio/excepciones.py b/dominio/excepciones.py
+index f6f65fc..8c244a4 100644
+--- a/dominio/excepciones.py
++++ b/dominio/excepciones.py
+@@ -24,3 +24,7 @@ class PeticionInvalida(ErrorAgente):
+ 
+ class ErrorLLM(ErrorAgente):
+     """Fallo al hablar con el servicio del LLM (red, servidor o respuesta rara)."""
++
++
++class ErrorTranscripcion(ErrorAgente):
++    """Fallo al pasar un audio a texto (archivo no válido, modelo no disponible o sin voz)."""
+diff --git a/dominio/transcriptor.py b/dominio/transcriptor.py
+new file mode 100644
+index 0000000..3895fec
+--- /dev/null
++++ b/dominio/transcriptor.py
+@@ -0,0 +1,95 @@
++import os
++import time
++from pathlib import Path
++
++from dominio.excepciones import ErrorTranscripcion
++
++
++# Carga el modelo Whisper en local. faster_whisper se importa aquí para que NEXO funcione sin instalarlo.
++def _cargar_faster_whisper(nombre):
++    try:
++        from faster_whisper import WhisperModel
++    except ImportError as e:
++        raise ErrorTranscripcion(
++            "Falta la librería de transcripción. Instálala con: pip install faster-whisper"
++        ) from e
++    return WhisperModel(nombre, device="cpu", compute_type="int8")
++
++
++class Transcriptor:
++    """Clase base: pasa un archivo de audio a texto. Cada hija decide cómo transcribir."""
++
++    EXTENSIONES = (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm")
++
++    # Guarda el nombre del transcriptor.
++    def __init__(self, nombre):
++        self.nombre = nombre
++        self._ultimo_uso = None
++
++    # Datos de la última transcripción: archivo, segundos de audio, milisegundos y caracteres.
++    @property
++    def ultimo_uso(self):
++        return self._ultimo_uso
++
++    # Comprueba el archivo ANTES de transcribir; si algo falla, lanza ErrorTranscripcion.
++    def validar(self, ruta):
++        if not ruta.is_file():
++            raise ErrorTranscripcion(f"No existe el archivo de audio: {ruta}")
++        if ruta.suffix.lower() not in self.EXTENSIONES:
++            raise ErrorTranscripcion(
++                f"Formato no soportado: {ruta.suffix or '(sin extensión)'}. "
++                f"Usa uno de: {', '.join(self.EXTENSIONES)}"
++            )
++        if ruta.stat().st_size == 0:
++            raise ErrorTranscripcion(f"El archivo de audio está vacío: {ruta.name}")
++
++    # Valida, transcribe, mide el tiempo y devuelve el texto.
++    def transcribir(self, ruta) -> str:
++        ruta = Path(ruta)
++        self.validar(ruta)
++        inicio = time.perf_counter()
++        texto, segundos_audio = self._transcribir(ruta)
++        texto = texto.strip()
++        if not texto:
++            raise ErrorTranscripcion(f"No se ha entendido nada en el audio: {ruta.name}")
++        self._ultimo_uso = {
++            "archivo": ruta.name,
++            "segundos_audio": segundos_audio,
++            "milisegundos": (time.perf_counter() - inicio) * 1000,
++            "caracteres": len(texto),
++        }
++        return texto
++
++    # Método abstracto: devuelve (texto, segundos de audio).
++    def _transcribir(self, ruta):
++        raise NotImplementedError("Cada transcriptor debe implementar _transcribir()")
++
++
++class TranscriptorLocal(Transcriptor):
++    """Transcribe en tu ordenador con faster-whisper: sin clave, sin internet (tras la primera descarga)."""
++
++    # Guarda la configuración; el modelo no se carga hasta la primera transcripción.
++    def __init__(self, modelo=None, idioma="es", cargador=None):
++        super().__init__("local")
++        self.modelo_whisper = modelo or os.getenv("STT_MODELO", "base")
++        self.idioma = idioma
++        self._cargador = cargador or _cargar_faster_whisper
++        self._modelo = None
++
++    # Carga el modelo solo la primera vez (la descarga puede tardar).
++    def _modelo_cargado(self):
++        if self._modelo is None:
++            self._modelo = self._cargador(self.modelo_whisper)
++        return self._modelo
++
++    # Transcribe con Whisper y une los trozos en un solo texto.
++    def _transcribir(self, ruta):
++        modelo = self._modelo_cargado()
++        try:
++            trozos, info = modelo.transcribe(str(ruta), language=self.idioma)
++            texto = " ".join(t.text.strip() for t in trozos)
++        except ErrorTranscripcion:
++            raise
++        except Exception as e:  # un audio roto no debe cerrar el chat
++            raise ErrorTranscripcion(f"No se pudo transcribir {ruta.name}: {e}") from e
++        return texto, float(info.duration)
+diff --git a/main.py b/main.py
+index 266573c..e983dd0 100644
+--- a/main.py
++++ b/main.py
+@@ -2,7 +2,10 @@ from dotenv import load_dotenv
+ 
+ from dominio.herramientas import Calculadora, ConversorMoneda, BuscadorFAQ
+ from dominio.modelos import ModeloReglas
++from dominio.transcriptor import TranscriptorLocal
+ from servicios.agente import Agente
++from servicios.servicio_transcripcion import ServicioTranscripcion
++from persistencia.registro_transcripciones import RegistroTranscripciones
+ from persistencia.repositorio_conversaciones import RepositorioConversaciones
+ from persistencia.registro_tokens import RegistroTokens
+ from persistencia.registro_uso import RegistroUso
+@@ -13,4 +16,5 @@ if __name__ == "__main__":
+     herramientas = [Calculadora(), ConversorMoneda(), BuscadorFAQ()]
+     registro = RegistroUso("datos/uso.csv")
+     agente = Agente(ModeloReglas(), herramientas, registro, RegistroTokens())
+-    ChatConsola(agente, RepositorioConversaciones(), registro).iniciar()
++    transcripcion = ServicioTranscripcion(TranscriptorLocal(), RegistroTranscripciones())
++    ChatConsola(agente, RepositorioConversaciones(), registro, transcripcion=transcripcion).iniciar()
+diff --git a/persistencia/registro_transcripciones.py b/persistencia/registro_transcripciones.py
+new file mode 100644
+index 0000000..5f2d2ee
+--- /dev/null
++++ b/persistencia/registro_transcripciones.py
+@@ -0,0 +1,49 @@
++import csv
++from datetime import datetime
++from pathlib import Path
++
++from dominio.excepciones import ErrorPersistencia
++
++
++class RegistroTranscripciones:
++    """Registro CSV de cada transcripción de audio (con el modelo local el coste es 0 €)."""
++
++    COLUMNAS = ["fecha", "archivo", "segundos_audio", "milisegundos", "caracteres"]
++
++    # Guarda la ruta del archivo CSV.
++    def __init__(self, ruta="datos/transcripciones.csv"):
++        self._ruta = Path(ruta)
++
++    # Añade una fila al CSV (y la cabecera si el archivo está vacío).
++    def registrar(self, archivo, segundos_audio, milisegundos, caracteres):
++        try:
++            self._ruta.parent.mkdir(parents=True, exist_ok=True)
++            hay_cabecera = self._ruta.exists() and self._ruta.stat().st_size > 0
++            with open(self._ruta, "a", newline="", encoding="utf-8") as f:
++                escritor = csv.writer(f)
++                if not hay_cabecera:
++                    escritor.writerow(self.COLUMNAS)
++                escritor.writerow([
++                    datetime.now().isoformat(timespec="seconds"),
++                    archivo,
++                    round(segundos_audio, 2),
++                    round(milisegundos, 2),
++                    caracteres,
++                ])
++        except OSError as e:
++            raise ErrorPersistencia(f"No se pudo escribir el registro de transcripciones: {e}") from e
++
++    # Lee el CSV y suma transcripciones, segundos de audio y tiempo de proceso.
++    def resumen(self) -> dict:
++        resumen = {"transcripciones": 0, "segundos_audio": 0.0, "milisegundos": 0.0}
++        if not self._ruta.exists():
++            return resumen
++        try:
++            with open(self._ruta, "r", newline="", encoding="utf-8") as f:
++                for fila in csv.DictReader(f):
++                    resumen["transcripciones"] += 1
++                    resumen["segundos_audio"] += float(fila["segundos_audio"])
++                    resumen["milisegundos"] += float(fila["milisegundos"])
++        except (OSError, UnicodeDecodeError, csv.Error, KeyError, ValueError) as e:
++            raise ErrorPersistencia(f"No se pudo leer el registro de transcripciones: {e}") from e
++        return resumen
+diff --git a/presentacion/api_web.py b/presentacion/api_web.py
+index 3e53a81..fe6e330 100644
+--- a/presentacion/api_web.py
++++ b/presentacion/api_web.py
+@@ -1,8 +1,10 @@
+ import json
++import tempfile
+ import time
+ import uuid
++from pathlib import Path
+ 
+-from fastapi import Body, FastAPI
++from fastapi import Body, FastAPI, File, UploadFile
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse, StreamingResponse
+ 
+@@ -21,7 +23,7 @@ def _texto(contenido):
+ 
+ 
+ # Crea la app web: habla el formato de OpenAI para que cualquier frontend la entienda.
+-def crear_app(agente):
++def crear_app(agente, transcripcion=None):
+     app = FastAPI(title="NEXO")
+     # CORS: sin esto el navegador bloquea las llamadas desde un index.html abierto en local.
+     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+@@ -63,6 +65,22 @@ def crear_app(agente):
+                          "finish_reason": "stop"}],
+         }
+ 
++    # Transcribe un audio (mismo formato que la API de OpenAI: multipart con el campo "file").
++    @app.post("/v1/audio/transcriptions")
++    def transcribir(file: UploadFile = File(...)):
++        if transcripcion is None:
++            return error(501, "La transcripción no está disponible")
++        # Se guarda con su nombre original (sin carpetas) para que el registro y la extensión sean correctos.
++        nombre = Path(file.filename or "audio").name
++        with tempfile.TemporaryDirectory() as carpeta:
++            ruta = Path(carpeta) / nombre
++            ruta.write_bytes(file.file.read())
++            try:
++                texto = transcripcion.transcribir(ruta)
++            except ErrorAgente as e:
++                return error(400, str(e))
++        return {"text": texto}
++
+     return app
+ 
+ 
+diff --git a/presentacion/chat_consola.py b/presentacion/chat_consola.py
+index 69d5cdf..633afbd 100644
+--- a/presentacion/chat_consola.py
++++ b/presentacion/chat_consola.py
+@@ -10,8 +10,9 @@ class ChatConsola:
+ 
+     # Recibe el agente y lo opcional; entrada y salida se pueden cambiar en las pruebas.
+     def __init__(self, agente, repositorio=None, registro_uso=None,
+-                 entrada=input, salida=print):
++                 entrada=input, salida=print, transcripcion=None):
+         self._agente = agente
++        self._transcripcion = transcripcion
+         self._repositorio = repositorio
+         self._registro = registro_uso
+         self._entrada = entrada
+@@ -27,6 +28,7 @@ class ChatConsola:
+             "/lista": self._cmd_lista,
+             "/nueva": self._cmd_nueva,
+             "/stats": self._cmd_stats,
++            "/transcribir": self._cmd_transcribir,
+         }
+ 
+     # Bucle del chat: lee, ejecuta un comando o una pregunta y muestra los errores sin cerrarse.
+@@ -172,3 +174,23 @@ class ChatConsola:
+         for herramienta, usos in resumen["usos"].items():
+             fallos = resumen["fallos"].get(herramienta, 0)
+             self._salida(f"  - {herramienta}: {usos} usos, {fallos} fallos")
++        audio = self._transcripcion.resumen() if self._transcripcion is not None else None
++        if audio and audio["transcripciones"]:
++            self._salida(f"🎙 Transcripciones: {audio['transcripciones']} "
++                         f"({audio['segundos_audio']:.1f} s de audio)")
++
++    # /transcribir <archivo>: pasa el audio a texto y se lo envía a NEXO como si lo hubieras escrito.
++    def _cmd_transcribir(self, argumento):
++        if self._transcripcion is None:
++            self._salida("⚠ La transcripción no está disponible.")
++            return
++        ruta = argumento.strip("\"'")  # al arrastrar un archivo a la terminal suele llegar entre comillas
++        if not ruta:
++            self._salida("Uso: /transcribir <archivo de audio>")
++            return
++        self._salida("🎙 Transcribiendo... (la primera vez puede tardar mientras se descarga el modelo)")
++        texto = self._transcripcion.transcribir(ruta)
++        self._salida(f"🎙 Transcripción: {texto}")
++        if self._transcripcion.aviso:
++            self._salida(f"⚠ {self._transcripcion.aviso}")
++        self._responder(texto)
+diff --git a/requirements.txt b/requirements.txt
+index 48b0e76..8b911d4 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -3,3 +3,5 @@ httpx
+ fastapi
+ uvicorn
+ python-dotenv
++python-multipart
++faster-whisper
+diff --git a/servicios/servicio_transcripcion.py b/servicios/servicio_transcripcion.py
+new file mode 100644
+index 0000000..c261a94
+--- /dev/null
++++ b/servicios/servicio_transcripcion.py
+@@ -0,0 +1,33 @@
++from dominio.excepciones import ErrorPersistencia
++
++
++class ServicioTranscripcion:
++    """Pasa un audio a texto y anota la transcripción. Lo usan el chat y la API web."""
++
++    # Recibe el transcriptor y, si se quiere, el registro CSV.
++    def __init__(self, transcriptor, registro=None):
++        self._transcriptor = transcriptor
++        self._registro = registro
++        self._aviso = None
++
++    # Aviso de la última transcripción (por ejemplo, que no se pudo escribir el CSV); None si todo fue bien.
++    @property
++    def aviso(self):
++        return self._aviso
++
++    # Transcribe el archivo y lo anota; si el CSV falla, deja un aviso y el texto no se pierde.
++    def transcribir(self, ruta) -> str:
++        self._aviso = None
++        texto = self._transcriptor.transcribir(ruta)
++        if self._registro is not None:
++            uso = self._transcriptor.ultimo_uso
++            try:
++                self._registro.registrar(uso["archivo"], uso["segundos_audio"],
++                                         uso["milisegundos"], uso["caracteres"])
++            except ErrorPersistencia as e:
++                self._aviso = str(e)
++        return texto
++
++    # Resumen del registro (None si no hay registro).
++    def resumen(self):
++        return self._registro.resumen() if self._registro is not None else None
+diff --git a/tests/ayudantes.py b/tests/ayudantes.py
+index 8c23026..4ff07e7 100644
+--- a/tests/ayudantes.py
++++ b/tests/ayudantes.py
+@@ -13,7 +13,7 @@ def crear_agente(registro=None):
+     return Agente(ModeloReglas(), [Calculadora(), ConversorMoneda(), BuscadorFAQ()], registro)
+ 
+ 
+-def ejecutar_chat(entradas, agente, repo=None, registro=None):
++def ejecutar_chat(entradas, agente, repo=None, registro=None, transcripcion=None):
+     """Runs ChatConsola with scripted input and returns everything it printed."""
+     cola, salida = iter(entradas), []
+ 
+@@ -23,5 +23,6 @@ def ejecutar_chat(entradas, agente, repo=None, registro=None):
+         except StopIteration:
+             raise EOFError
+ 
+-    ChatConsola(agente, repo, registro, entrada=entrada, salida=salida.append).iniciar()
++    ChatConsola(agente, repo, registro, entrada=entrada, salida=salida.append,
++                transcripcion=transcripcion).iniciar()
+     return "\n".join(salida)
+diff --git a/tests/dominio/test_excepciones.py b/tests/dominio/test_excepciones.py
+index 8f99fb7..e967d16 100644
+--- a/tests/dominio/test_excepciones.py
++++ b/tests/dominio/test_excepciones.py
+@@ -3,7 +3,8 @@ import pytest
+ from dominio import excepciones
+ 
+ PROPIAS = [excepciones.HerramientaNoEncontrada, excepciones.ArgumentosInvalidos,
+-           excepciones.LimiteContextoSuperado, excepciones.ErrorPersistencia]
++           excepciones.LimiteContextoSuperado, excepciones.ErrorPersistencia,
++           excepciones.ErrorTranscripcion]
+ 
+ 
+ @pytest.mark.parametrize("clase", PROPIAS)
+diff --git a/tests/dominio/test_transcriptor.py b/tests/dominio/test_transcriptor.py
+new file mode 100644
+index 0000000..7795c1e
+--- /dev/null
++++ b/tests/dominio/test_transcriptor.py
+@@ -0,0 +1,117 @@
++import sys
++from types import SimpleNamespace
++
++import pytest
++
++from dominio.excepciones import ErrorAgente, ErrorTranscripcion
++from dominio.transcriptor import Transcriptor, TranscriptorLocal, _cargar_faster_whisper
++
++
++class WhisperFalso:
++    """Imita a faster-whisper: devuelve trozos de texto y la duración del audio."""
++
++    def __init__(self, textos=("hola", "que tal"), duracion=3.5, error=None):
++        self.textos, self.duracion, self.error, self.llamadas = textos, duracion, error, []
++
++    def transcribe(self, ruta, language=None):
++        self.llamadas.append((ruta, language))
++        if self.error:
++            raise self.error
++        return (SimpleNamespace(text=f" {t} ") for t in self.textos), SimpleNamespace(duration=self.duracion)
++
++
++@pytest.fixture
++def audio(tmp_path):
++    ruta = tmp_path / "nota.wav"
++    ruta.write_bytes(b"RIFF0000WAVE")
++    return ruta
++
++
++def _transcriptor(whisper=None, **opciones):
++    whisper = whisper or WhisperFalso()
++    cargas = []
++
++    def cargador(nombre):
++        cargas.append(nombre)
++        return whisper
++
++    return TranscriptorLocal(cargador=cargador, **opciones), whisper, cargas
++
++
++def test_es_un_transcriptor():
++    assert issubclass(TranscriptorLocal, Transcriptor)
++    assert isinstance(TranscriptorLocal(), Transcriptor)
++
++
++def test_la_clase_base_es_abstracta(audio):
++    with pytest.raises(NotImplementedError):
++        Transcriptor("base").transcribir(audio)
++
++
++def test_transcribe_y_une_los_trozos(audio):
++    transcriptor, whisper, _ = _transcriptor()
++    assert transcriptor.transcribir(audio) == "hola que tal"
++    assert whisper.llamadas == [(str(audio), "es")]
++
++
++def test_guarda_el_uso_de_la_ultima_transcripcion(audio):
++    transcriptor, _, _ = _transcriptor()
++    assert transcriptor.ultimo_uso is None
++    transcriptor.transcribir(audio)
++    uso = transcriptor.ultimo_uso
++    assert uso["archivo"] == "nota.wav" and uso["segundos_audio"] == 3.5
++    assert uso["caracteres"] == len("hola que tal") and uso["milisegundos"] >= 0
++
++
++def test_el_modelo_se_carga_una_sola_vez_y_solo_al_usarlo(audio):
++    transcriptor, _, cargas = _transcriptor(modelo="small")
++    assert cargas == []
++    transcriptor.transcribir(audio)
++    transcriptor.transcribir(audio)
++    assert cargas == ["small"]
++
++
++def test_el_modelo_sale_de_la_variable_de_entorno(monkeypatch):
++    monkeypatch.setenv("STT_MODELO", "tiny")
++    assert TranscriptorLocal().modelo_whisper == "tiny"
++
++
++def test_archivo_que_no_existe(tmp_path):
++    transcriptor, _, cargas = _transcriptor()
++    with pytest.raises(ErrorTranscripcion, match="No existe"):
++        transcriptor.transcribir(tmp_path / "nada.wav")
++    assert cargas == []  # ni siquiera se carga el modelo
++
++
++def test_formato_no_soportado(tmp_path):
++    texto = tmp_path / "notas.txt"
++    texto.write_text("hola", encoding="utf-8")
++    with pytest.raises(ErrorTranscripcion, match="Formato no soportado"):
++        _transcriptor()[0].transcribir(texto)
++
++
++def test_archivo_vacio(tmp_path):
++    vacio = tmp_path / "vacio.mp3"
++    vacio.write_bytes(b"")
++    with pytest.raises(ErrorTranscripcion, match="vacío"):
++        _transcriptor()[0].transcribir(vacio)
++
++
++def test_audio_sin_voz(audio):
++    transcriptor, _, _ = _transcriptor(WhisperFalso(textos=("  ",)))
++    with pytest.raises(ErrorTranscripcion, match="No se ha entendido nada"):
++        transcriptor.transcribir(audio)
++    assert transcriptor.ultimo_uso is None
++
++
++def test_un_fallo_del_modelo_se_convierte_en_error_transcripcion(audio):
++    transcriptor, _, _ = _transcriptor(WhisperFalso(error=RuntimeError("audio roto")))
++    with pytest.raises(ErrorTranscripcion, match="audio roto") as e:
++        transcriptor.transcribir(audio)
++    assert isinstance(e.value, ErrorAgente)
++
++
++def test_si_falta_faster_whisper_el_mensaje_dice_como_instalarlo(monkeypatch):
++    monkeypatch.setitem(sys.modules, "faster_whisper", None)  # hace que "import faster_whisper" falle
++    with pytest.raises(ErrorTranscripcion, match="pip install faster-whisper"):
++        _cargar_faster_whisper("base")
+diff --git a/tests/persistencia/test_registro_transcripciones.py b/tests/persistencia/test_registro_transcripciones.py
+new file mode 100644
+index 0000000..ee7c7a6
+--- /dev/null
++++ b/tests/persistencia/test_registro_transcripciones.py
+@@ -0,0 +1,41 @@
++import pytest
++
++from dominio.excepciones import ErrorPersistencia
++from persistencia.registro_transcripciones import RegistroTranscripciones
++
++
++@pytest.fixture
++def ruta(tmp_path):
++    return tmp_path / "datos" / "transcripciones.csv"
++
++
++def test_resumen_vacio(ruta):
++    assert RegistroTranscripciones(ruta).resumen() == {
++        "transcripciones": 0, "segundos_audio": 0.0, "milisegundos": 0.0}
++
++
++def test_cabecera_unica_y_columnas(ruta):
++    RegistroTranscripciones(ruta).registrar("a.wav", 3.5, 800.0, 20)
++    RegistroTranscripciones(ruta).registrar("b.wav", 1.0, 200.0, 5)
++    lineas = ruta.read_text(encoding="utf-8").splitlines()
++    assert lineas[0] == "fecha,archivo,segundos_audio,milisegundos,caracteres"
++    assert len(lineas) == 3 and lineas[1].split(",")[1:] == ["a.wav", "3.5", "800.0", "20"]
++
++
++def test_resumen_suma_las_filas(ruta):
++    registro = RegistroTranscripciones(ruta)
++    registro.registrar("a.wav", 3.5, 800.0, 20)
++    registro.registrar("b.wav", 1.5, 200.0, 5)
++    assert registro.resumen() == {"transcripciones": 2, "segundos_audio": 5.0, "milisegundos": 1000.0}
++
++
++def test_error_al_escribir(tmp_path):
++    with pytest.raises(ErrorPersistencia):
++        RegistroTranscripciones(tmp_path).registrar("a.wav", 1, 1, 1)  # la ruta es una carpeta
++
++
++def test_csv_corrupto_al_leer(ruta):
++    ruta.parent.mkdir(parents=True)
++    ruta.write_text("fecha,archivo\nhoy,a.wav\n", encoding="utf-8")
++    with pytest.raises(ErrorPersistencia):
++        RegistroTranscripciones(ruta).resumen()
+diff --git a/tests/presentacion/test_api_transcripcion.py b/tests/presentacion/test_api_transcripcion.py
+new file mode 100644
+index 0000000..4ed18c7
+--- /dev/null
++++ b/tests/presentacion/test_api_transcripcion.py
+@@ -0,0 +1,62 @@
++import pytest
++from fastapi.testclient import TestClient
++
++from dominio.transcriptor import Transcriptor
++from persistencia.registro_transcripciones import RegistroTranscripciones
++from presentacion.api_web import crear_app
++from servicios.servicio_transcripcion import ServicioTranscripcion
++from tests.ayudantes import crear_agente
++
++
++class TranscriptorFalso(Transcriptor):
++    def __init__(self):
++        super().__init__("falso")
++        self.rutas = []
++
++    def _transcribir(self, ruta):
++        self.rutas.append(ruta)
++        return "hola desde el audio", 2.0
++
++
++@pytest.fixture
++def montaje(tmp_path):
++    transcriptor = TranscriptorFalso()
++    registro = RegistroTranscripciones(tmp_path / "t.csv")
++    cliente = TestClient(crear_app(crear_agente(), ServicioTranscripcion(transcriptor, registro)))
++    return cliente, transcriptor, registro
++
++
++def test_transcribe_en_formato_openai(montaje):
++    cliente, _, registro = montaje
++    r = cliente.post("/v1/audio/transcriptions", files={"file": ("voz.wav", b"RIFF0000", "audio/wav")})
++    assert r.status_code == 200 and r.json() == {"text": "hola desde el audio"}
++    assert registro.resumen()["transcripciones"] == 1
++
++
++def test_conserva_el_nombre_pero_no_las_carpetas(montaje):
++    cliente, transcriptor, _ = montaje
++    cliente.post("/v1/audio/transcriptions", files={"file": ("../../x/voz.mp3", b"ID3", "audio/mpeg")})
++    assert transcriptor.rutas[0].name == "voz.mp3"
++    assert not transcriptor.rutas[0].exists()  # el archivo temporal se borra
++
++
++def test_formato_malo_da_400_con_mensaje(montaje):
++    cliente, _, _ = montaje
++    r = cliente.post("/v1/audio/transcriptions", files={"file": ("notas.txt", b"hola", "text/plain")})
++    assert r.status_code == 400 and "Formato no soportado" in r.json()["error"]["message"]
++
++
++def test_archivo_vacio_da_400(montaje):
++    cliente, _, _ = montaje
++    r = cliente.post("/v1/audio/transcriptions", files={"file": ("vacio.wav", b"", "audio/wav")})
++    assert r.status_code == 400
++
++
++def test_sin_archivo_da_error_de_validacion(montaje):
++    assert montaje[0].post("/v1/audio/transcriptions").status_code == 422
++
++
++def test_sin_servicio_da_501():
++    cliente = TestClient(crear_app(crear_agente()))
++    r = cliente.post("/v1/audio/transcriptions", files={"file": ("voz.wav", b"RIFF", "audio/wav")})
++    assert r.status_code == 501 and r.json()["error"]["message"]
+diff --git a/tests/presentacion/test_chat_transcripcion.py b/tests/presentacion/test_chat_transcripcion.py
+new file mode 100644
+index 0000000..bb6d474
+--- /dev/null
++++ b/tests/presentacion/test_chat_transcripcion.py
+@@ -0,0 +1,67 @@
++from dominio.transcriptor import Transcriptor
++from persistencia.registro_transcripciones import RegistroTranscripciones
++from persistencia.registro_uso import RegistroUso
++from servicios.servicio_transcripcion import ServicioTranscripcion
++from tests.ayudantes import crear_agente, ejecutar_chat
++
++
++class TranscriptorFalso(Transcriptor):
++    def __init__(self, texto="cuánto tarda el envío?"):
++        super().__init__("falso")
++        self.texto = texto
++
++    def _transcribir(self, ruta):
++        return self.texto, 4.0
++
++
++def _servicio(tmp_path, texto="cuánto tarda el envío?"):
++    return ServicioTranscripcion(TranscriptorFalso(texto), RegistroTranscripciones(tmp_path / "t.csv"))
++
++
++def _audio(tmp_path, nombre="pregunta.wav"):
++    ruta = tmp_path / nombre
++    ruta.write_bytes(b"RIFF")
++    return ruta
++
++
++def test_transcribir_envia_el_texto_a_nexo(tmp_path):
++    texto = ejecutar_chat([f"/transcribir {_audio(tmp_path)}"], crear_agente(),
++                          transcripcion=_servicio(tmp_path))
++    assert "🎙 Transcripción: cuánto tarda el envío?" in texto
++    assert "Según nuestra información: Los envíos tardan 24-48 h" in texto
++
++
++def test_acepta_la_ruta_entre_comillas(tmp_path):
++    ruta = _audio(tmp_path, "mi pregunta.wav")
++    texto = ejecutar_chat([f'/transcribir "{ruta}"'], crear_agente(), transcripcion=_servicio(tmp_path))
++    assert "🎙 Transcripción:" in texto and "⚠" not in texto
++
++
++def test_sin_servicio_avisa(tmp_path):
++    texto = ejecutar_chat([f"/transcribir {_audio(tmp_path)}"], crear_agente())
++    assert "⚠ La transcripción no está disponible." in texto
++
++
++def test_sin_argumento_explica_el_uso(tmp_path):
++    texto = ejecutar_chat(["/transcribir"], crear_agente(), transcripcion=_servicio(tmp_path))
++    assert "Uso: /transcribir <archivo de audio>" in texto
++
++
++def test_un_archivo_malo_no_cierra_el_chat(tmp_path):
++    texto = ejecutar_chat(["/transcribir no_existe.wav", "hola"], crear_agente(),
++                          transcripcion=_servicio(tmp_path))
++    assert "⚠ No existe el archivo de audio" in texto
++    assert "NEXO > ¡Hola!" in texto
++
++
++def test_el_aviso_del_csv_se_muestra_pero_la_respuesta_llega(tmp_path):
++    servicio = ServicioTranscripcion(TranscriptorFalso(), RegistroTranscripciones(tmp_path))  # ruta = carpeta
++    texto = ejecutar_chat([f"/transcribir {_audio(tmp_path)}"], crear_agente(), transcripcion=servicio)
++    assert "⚠ No se pudo escribir el registro de transcripciones" in texto
++    assert "Según nuestra información" in texto
++
++
++def test_stats_muestra_las_transcripciones(tmp_path):
++    texto = ejecutar_chat([f"/transcribir {_audio(tmp_path)}", "/stats"], crear_agente(),
++                          registro=RegistroUso(tmp_path / "uso.csv"), transcripcion=_servicio(tmp_path))
++    assert "🎙 Transcripciones: 1 (4.0 s de audio)" in texto
+diff --git a/tests/servicios/test_servicio_transcripcion.py b/tests/servicios/test_servicio_transcripcion.py
+new file mode 100644
+index 0000000..aa3ab49
+--- /dev/null
++++ b/tests/servicios/test_servicio_transcripcion.py
+@@ -0,0 +1,57 @@
++import pytest
++
++from dominio.excepciones import ErrorTranscripcion
++from dominio.transcriptor import Transcriptor
++from persistencia.registro_transcripciones import RegistroTranscripciones
++from servicios.servicio_transcripcion import ServicioTranscripcion
++
++
++class TranscriptorFalso(Transcriptor):
++    def __init__(self, texto="dos mas dos"):
++        super().__init__("falso")
++        self.texto = texto
++
++    def _transcribir(self, ruta):
++        return self.texto, 2.0
++
++
++@pytest.fixture
++def audio(tmp_path):
++    ruta = tmp_path / "voz.mp3"
++    ruta.write_bytes(b"ID3")
++    return ruta
++
++
++def test_transcribe_y_anota(tmp_path, audio):
++    registro = RegistroTranscripciones(tmp_path / "t.csv")
++    servicio = ServicioTranscripcion(TranscriptorFalso(), registro)
++    assert servicio.transcribir(audio) == "dos mas dos"
++    assert servicio.aviso is None
++    assert registro.resumen()["transcripciones"] == 1
++    assert servicio.resumen()["segundos_audio"] == 2.0
++
++
++def test_funciona_sin_registro(audio):
++    servicio = ServicioTranscripcion(TranscriptorFalso())
++    assert servicio.transcribir(audio) == "dos mas dos"
++    assert servicio.resumen() is None
++
++
++def test_si_falla_el_csv_deja_aviso_y_no_pierde_el_texto(tmp_path, audio):
++    servicio = ServicioTranscripcion(TranscriptorFalso(), RegistroTranscripciones(tmp_path))  # ruta = carpeta
++    assert servicio.transcribir(audio) == "dos mas dos"
++    assert "No se pudo escribir" in servicio.aviso
++
++
++def test_el_aviso_se_borra_en_la_siguiente_transcripcion(tmp_path, audio):
++    servicio = ServicioTranscripcion(TranscriptorFalso(), RegistroTranscripciones(tmp_path))
++    servicio.transcribir(audio)
++    servicio._registro = None
++    servicio.transcribir(audio)
++    assert servicio.aviso is None
++
++
++def test_los_errores_del_transcriptor_suben(tmp_path):
++    servicio = ServicioTranscripcion(TranscriptorFalso())
++    with pytest.raises(ErrorTranscripcion):
++        servicio.transcribir(tmp_path / "no_existe.wav")
+diff --git a/web.py b/web.py
+index 6c7539b..382790a 100644
+--- a/web.py
++++ b/web.py
+@@ -6,10 +6,13 @@ from dotenv import load_dotenv
+ from dominio.herramientas import BuscadorFAQ, Calculadora, ConversorMoneda
+ from dominio.modelo_llm import ModeloLLM
+ from dominio.modelos import ModeloEco, ModeloReglas
++from dominio.transcriptor import TranscriptorLocal
++from persistencia.registro_transcripciones import RegistroTranscripciones
+ from persistencia.registro_tokens import RegistroTokens
+ from persistencia.registro_uso import RegistroUso
+ from presentacion.api_web import crear_app
+ from servicios.agente import Agente
++from servicios.servicio_transcripcion import ServicioTranscripcion
+ 
+ MODELOS = {"reglas": ModeloReglas, "eco": ModeloEco, "llm": ModeloLLM}
+ 
+@@ -19,4 +22,5 @@ if __name__ == "__main__":
+     modelo = MODELOS[os.getenv("NEXO_MODELO", "reglas")]()
+     herramientas = [Calculadora(), ConversorMoneda(), BuscadorFAQ()]
+     agente = Agente(modelo, herramientas, RegistroUso("datos/uso.csv"), RegistroTokens())
+-    uvicorn.run(crear_app(agente), host="127.0.0.1", port=8000)
++    transcripcion = ServicioTranscripcion(TranscriptorLocal(), RegistroTranscripciones())
++    uvicorn.run(crear_app(agente, transcripcion), host="127.0.0.1", port=8000)

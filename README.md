@@ -6,12 +6,12 @@ Agente de IA en Python con arquitectura por capas. Tiene tres modelos: `ModeloEc
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts\activate
-pip install -r requirements.txt   # pytest, httpx, fastapi, uvicorn, python-dotenv
+pip install -r requirements.txt   # pytest, httpx, fastapi, uvicorn, python-dotenv, python-multipart
 cp .env.example .env              # y rellena tus datos (ver "Configuración del LLM")
 python main.py                    # chat por consola
 python web.py                     # API web en http://127.0.0.1:8000 (para el frontend)
 python comparar_modelos.py        # compara ModeloReglas y ModeloLLM con 10 preguntas
-pytest                            # pruebas (106; no necesitan LLM ni internet)
+pytest                            # pruebas (146; no necesitan LLM, internet ni audio real)
 ```
 
 `main.py`, `web.py` y `comparar_modelos.py` se ejecutan desde la raíz del proyecto. Sin LLM, el chat y la API funcionan igual con `ModeloReglas`.
@@ -21,9 +21,9 @@ pytest                            # pruebas (106; no necesitan LLM ni internet)
 | Capa | Archivos |
 |---|---|
 | Presentación | `presentacion/chat_consola.py`, `presentacion/api_web.py` |
-| Servicios | `servicios/agente.py` |
-| Dominio | `dominio/excepciones.py`, `mensaje.py`, `herramientas.py`, `modelos.py`, `modelo_llm.py` |
-| Persistencia | `persistencia/repositorio_conversaciones.py`, `registro_uso.py`, `registro_tokens.py` |
+| Servicios | `servicios/agente.py`, `servicios/servicio_transcripcion.py` |
+| Dominio | `dominio/excepciones.py`, `mensaje.py`, `herramientas.py`, `modelos.py`, `modelo_llm.py`, `transcriptor.py` |
+| Persistencia | `persistencia/repositorio_conversaciones.py`, `registro_uso.py`, `registro_tokens.py`, `registro_transcripciones.py` |
 | Conexión | `main.py` (consola) y `web.py` (API web): los únicos sitios donde se unen las piezas |
 | Script | `comparar_modelos.py` (compara dos modelos con 10 preguntas) |
 
@@ -41,7 +41,8 @@ No hay `print()` ni `input()` en `dominio/` ni `servicios/` (lo verifica una pru
 | `/cargar <id>` | Restaura una conversación completa en el agente |
 | `/lista` | Conversaciones guardadas |
 | `/nueva` | Nueva conversación (con id nuevo; las guardadas no se tocan) |
-| `/stats` | Resumen del registro de uso |
+| `/stats` | Resumen del registro de uso (y de las transcripciones, si hay) |
+| `/transcribir <archivo>` | Pasa un audio a texto y se lo envía a NEXO como si lo hubieras escrito |
 | `/salir` | Termina |
 
 Los errores (`ErrorAgente` y derivadas, o cualquier fallo inesperado) se muestran como mensaje y el chat sigue abierto.
@@ -97,16 +98,45 @@ fecha,pregunta,tokens_entrada,tokens_salida,coste
 ```
 (78 × 0,008 / 1000 = 0,000624 €.)
 
+### Transcripción de audio (`dominio/transcriptor.py`)
+Permite hablarle a NEXO con un archivo de audio (`.wav`, `.mp3`, `.m4a`, `.ogg`, `.flac`, `.webm`). **El `Agente` no cambió**: la transcripción ocurre antes y el texto entra como una pregunta normal.
+
+- `Transcriptor` es la clase base (como `Modelo`). `TranscriptorLocal` hereda de ella y usa **faster-whisper** en tu ordenador: sin clave, sin coste y sin internet (salvo la primera vez, que descarga el modelo). Para añadir una API de pago bastaría otra hija, por ejemplo `TranscriptorAPI`.
+- **Validación** antes de cargar el modelo: el archivo existe, el formato es válido y no está vacío. Si el audio no tiene voz, también da error. Todo lanza `ErrorTranscripcion` (hija de `ErrorAgente`), así que el chat lo muestra y sigue abierto.
+- El modelo se **carga la primera vez que se usa**, no al arrancar, y `faster-whisper` solo se importa en ese momento. Se elige con `STT_MODELO` en el `.env` (`tiny`, `base`, `small`...; por defecto `base`).
+- `ServicioTranscripcion` (capa de servicios) transcribe y anota cada audio en `datos/transcripciones.csv` (`fecha,archivo,segundos_audio,milisegundos,caracteres`). Si el CSV falla, deja un `aviso` y el texto no se pierde. Lo usan el chat y la API.
+- **Instalación del audio** (aparte, porque `faster-whisper` es pesado): `pip install -r requirements-audio.txt` y después `pip install --no-deps faster-whisper`. Se hace en dos pasos porque `faster-whisper` pide `onnxruntime`, que solo sirve para el filtro de silencios (NEXO no lo usa) y aún no tiene versión para Python 3.15. Se fija `av<19` porque `faster-whisper` 1.2.1 no funciona con `av` 19. Sin esta instalación, NEXO funciona igual y el audio da un aviso.
+- **Si Windows bloquea la librería `av`** (error «Una directiva de Control de aplicaciones bloqueó este archivo»): `faster-whisper` usa `av` solo para leer formatos como mp3 o webm. NEXO lo detecta, pone un `av` falso para poder importar `faster-whisper` y lee él mismo los archivos **WAV** (`leer_wav()` en `dominio/transcriptor.py`: WAV de 16 bits, pasa a mono y 16 kHz). En ese caso en la consola solo sirven `.wav`; la página web no tiene problema porque convierte el audio a WAV en el navegador antes de enviarlo.
+- **Consola:** `/transcribir ruta/al/audio.wav` muestra el texto (`🎙 Transcripción: ...`) y NEXO responde.
+- **API web:** `POST /v1/audio/transcriptions` (formato de OpenAI: multipart con el campo `file`) devuelve `{"text": "..."}`.
+
+```bash
+curl -X POST localhost:8000/v1/audio/transcriptions -F "file=@pregunta.wav"
+# → {"text":"cuánto tarda el envío"}
+```
+- **Limitaciones:** solo archivos (no micrófono en directo). `ModeloReglas` entiende cifras (`2 + 2`), pero Whisper suele escribir los números con letras («dos más dos»), así que con audios de cálculos funciona mejor `ModeloLLM`. Los tests usan un Whisper falso: no necesitan el modelo ni audios reales.
+
 ### Frontend web
 `web.py` arranca una API (`presentacion/api_web.py`, FastAPI) que habla el formato de OpenAI: `POST /v1/chat/completions` y `GET /v1/models`. Por eso sirve casi cualquier frontend de chat.
 
-- Frontend usado: **[AI-QL/chat-ui](https://github.com/AI-QL/chat-ui)**, un único `index.html` que no he modificado. Consulta su repositorio para ver su licencia.
+- Frontend usado: **[AI-QL/chat-ui](https://github.com/AI-QL/chat-ui)** (licencia Apache 2.0), un único `index.html`. **He modificado esa copia** para añadir el botón de audio (ver más abajo); el resto es del proyecto original.
 - Para usarlo: `python web.py`, abre `index.html` en el navegador, pulsa la rueda de ajustes y pon:
   - **API Key:** cualquier texto (la API no la comprueba).
   - **URL:** `http://127.0.0.1:8000/v1` · **Path:** `/chat/completions` · **Model:** `nexo`.
 - El frontend manda todo el historial en cada mensaje, pero el `Agente` ya guarda el suyo, así que la API usa solo el último mensaje del usuario. Si llega un solo mensaje, entiende que es un chat nuevo.
 - CORS está activado para que el navegador deje llamar a la API desde un `index.html` local.
 - **Limitación:** el streaming es simulado. El agente calcula la respuesta entera y la API la envía palabra a palabra.
+
+**Botón de audio en la web (cambios en `index.html`, marcados con `NEXO:`):**
+1. Junto al botón `+` de las imágenes hay dos botones nuevos:
+   - **Micrófono:** pulsas para empezar a grabar (se pone rojo), hablas y vuelves a pulsar para parar. La grabación se transcribe sola. El navegador pide permiso para usar el micrófono. No es en tiempo real: el texto sale al parar.
+   - **Nota musical:** eliges un archivo de audio que ya tengas.
+2. El navegador convierte el audio a WAV (mono, 16 kHz) con la API de audio del propio navegador, así que el servidor no necesita leer mp3, webm, etc. Si la conversión falla, se envía el original. Después el audio se envía a `POST {URL}/audio/transcriptions` (la URL que pusiste en los ajustes) y mientras tanto sale una ruedecita.
+3. El texto transcrito **se escribe en la caja del chat** y no se envía solo: así puedes corregirlo (Whisper a veces se equivoca) y mandarlo con Enter. Si ya había texto escrito, el audio se añade al final.
+4. Si falla (formato no válido, audio sin voz, API apagada) sale el error en un aviso rojo y el chat sigue funcionando.
+
+Cambios exactos: 3 propiedades nuevas en el estado de `messageStore` (`audio`, `transcribiendo`, `grabando`), dos acciones nuevas (`toggleGrabacion` y `transcribeAudio`), dos funciones (`nexoAWav` y `nexoCodificarWav`) y los dos botones en la plantilla.
+La primera transcripción tarda más porque `faster-whisper` descarga el modelo; hasta que termina, la ruedecita sigue girando.
 
 Ejemplo sin frontend:
 ```bash
@@ -157,10 +187,10 @@ La carpeta `tests/` replica la estructura del proyecto:
 
 ```
 tests/
-├── dominio/        test_excepciones · test_mensaje · test_herramientas · test_modelos · test_modelo_llm
-├── servicios/      test_agente · test_agente_tokens
-├── persistencia/   test_repositorio_conversaciones · test_registro_uso · test_registro_tokens
-├── presentacion/   test_chat_consola · test_api_web
+├── dominio/        test_excepciones · test_mensaje · test_herramientas · test_modelos · test_modelo_llm · test_transcriptor
+├── servicios/      test_agente · test_agente_tokens · test_servicio_transcripcion
+├── persistencia/   test_repositorio_conversaciones · test_registro_uso · test_registro_tokens · test_registro_transcripciones
+├── presentacion/   test_chat_consola · test_api_web · test_chat_transcripcion · test_api_transcripcion
 ├── test_main.py          ← main.py (ciclo real guardar → cerrar → reabrir → cargar)
 ├── test_comparar_modelos.py  ← el script de comparación, con un LLM falso
 ├── test_arquitectura.py  ← reglas globales: sin print/input en dominio/servicios, sin isinstance en el agente

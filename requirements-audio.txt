@@ -1,0 +1,13 @@
+# Librerías para transcribir audio (se instalan aparte del resto).
+# Instalación (dos comandos, en este orden):
+#   pip install -r requirements-audio.txt
+#   pip install --no-deps faster-whisper
+# Se instala faster-whisper "sin dependencias" porque pide onnxruntime, que solo hace falta para el
+# filtro de silencios (VAD) y NEXO no lo usa. Así funciona también con Python 3.15.
+# av<19: faster-whisper 1.2.1 no funciona con av 19 (quitó un parámetro que usa para abrir audios).
+ctranslate2>=4.0,<5
+tokenizers>=0.13,<1
+huggingface-hub>=0.21
+av>=15,<19
+tqdm
+numpy
