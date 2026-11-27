@@ -11,7 +11,7 @@ cp .env.example .env              # y rellena tus datos (ver "Configuración del
 python main.py                    # chat por consola
 python web.py                     # API web en http://127.0.0.1:8000 (para el frontend)
 python comparar_modelos.py        # compara ModeloReglas y ModeloLLM con 10 preguntas
-pytest                            # pruebas (146; no necesitan LLM, internet ni audio real)
+pytest                            # pruebas (154; no necesitan LLM, internet ni audio real)
 ```
 
 `main.py`, `web.py` y `comparar_modelos.py` se ejecutan desde la raíz del proyecto. Sin LLM, el chat y la API funcionan igual con `ModeloReglas`.
@@ -26,6 +26,9 @@ pytest                            # pruebas (146; no necesitan LLM, internet ni 
 | Persistencia | `persistencia/repositorio_conversaciones.py`, `registro_uso.py`, `registro_tokens.py`, `registro_transcripciones.py` |
 | Conexión | `main.py` (consola) y `web.py` (API web): los únicos sitios donde se unen las piezas |
 | Script | `comparar_modelos.py` (compara dos modelos con 10 preguntas) |
+| Pruebas | `tests/` (ver Reto 5) |
+| Documentación | `docs/diagrama_clases.png` y `diagrama_clases_NEXO.drawio` (diagrama de clases) |
+| Configuración | `requirements.txt`, `requirements-audio.txt` (solo para audio), `.env.example`, `pytest.ini` |
 
 No hay `print()` ni `input()` en `dominio/` ni `servicios/` (lo verifica una prueba).
 
@@ -213,7 +216,7 @@ intactos los más recientes (hasta 4, o menos si hace falta para bajar del 80 %)
 
 ## Diagrama de clases
 
-Solo aparecen los métodos públicos principales. Los detalles están en el código de cada clase. **La imagen es la del Nivel 3 (sin la ampliación); el código Mermaid de abajo sí incluye `ModeloLLM`, `ApiWeb`, `RegistroTokens` y las dos excepciones nuevas.**
+Solo aparecen los métodos públicos principales. Los detalles están en el código de cada clase. **La imagen es la del Nivel 3 (sin la ampliación); el código Mermaid de abajo sí incluye `ModeloLLM`, `ApiWeb`, `RegistroTokens`, la parte de audio (`Transcriptor`, `TranscriptorLocal`, `ServicioTranscripcion`, `RegistroTranscripciones`) y las tres excepciones nuevas (`PeticionInvalida`, `ErrorLLM` y `ErrorTranscripcion`).**
 
 ![Diagrama de clases de NEXO](docs/diagrama_clases.png)
 
@@ -285,6 +288,22 @@ classDiagram
         +calcular_coste(tokens_salida) float
         +resumen() dict
     }
+    class Transcriptor {
+        <<abstract>>
+        +ultimo_uso : dict
+        +validar(ruta)
+        +transcribir(ruta) str
+    }
+    class TranscriptorLocal
+    class ServicioTranscripcion {
+        +aviso : str
+        +transcribir(ruta) str
+        +resumen() dict
+    }
+    class RegistroTranscripciones {
+        +registrar(archivo, segundos_audio, milisegundos, caracteres)
+        +resumen() dict
+    }
     class ErrorAgente {
         <<exception>>
     }
@@ -294,9 +313,12 @@ classDiagram
     class ErrorPersistencia
     class PeticionInvalida
     class ErrorLLM
+    class ErrorTranscripcion
 
     ChatConsola --> Agente
     ApiWeb --> Agente
+    ChatConsola --> ServicioTranscripcion
+    ApiWeb --> ServicioTranscripcion
     ChatConsola --> RepositorioConversaciones
     ChatConsola ..> ErrorAgente : captura
 
@@ -306,12 +328,16 @@ classDiagram
     Agente o-- Herramienta
     Agente --> RegistroUso
     Agente --> RegistroTokens
+    ServicioTranscripcion --> Transcriptor
+    ServicioTranscripcion --> RegistroTranscripciones
 
     Modelo <|-- ModeloEco
     Modelo <|-- ModeloReglas
     Modelo <|-- ModeloLLM
     Modelo ..> Conversacion : lee
     Modelo ..> Respuesta : devuelve
+
+    Transcriptor <|-- TranscriptorLocal
 
     Herramienta <|-- Calculadora
     Herramienta <|-- ConversorMoneda
@@ -325,12 +351,13 @@ classDiagram
     ErrorAgente <|-- ErrorPersistencia
     ErrorAgente <|-- PeticionInvalida
     ErrorAgente <|-- ErrorLLM
+    ErrorAgente <|-- ErrorTranscripcion
 ```
 
 </details>
 
 **Cómo leerlo:**
-- **Herencia** (`<|--`): los 3 tipos de herramienta, los 3 modelos y las 6 excepciones heredan de su clase base. El agente usa herramientas y modelos a través de la base, sin saber cuál es cuál (polimorfismo).
+- **Herencia** (`<|--`): los 3 tipos de herramienta, los 3 modelos, los transcriptores y las 7 excepciones heredan de su clase base. El agente usa herramientas y modelos a través de la base, sin saber cuál es cuál (polimorfismo).
 - **Composición** (`*--`): el `Agente` crea **su** `Conversacion`, y la `Conversacion` está formada por `Mensaje`s.
 - **Agregación** (`o--`): el `Agente` usa herramientas que se crean **fuera**, en `main.py`.
 - **Asociación** (`-->`): una clase guarda una referencia a otra.
