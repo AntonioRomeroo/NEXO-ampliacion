@@ -348,7 +348,7 @@ classDiagram
   - La ampliación del Tema 2 (`ModeloLLM`, la API web, el registro de tokens y el script de comparación) la hizo la IA (Claude, en el chat) a partir de la guía del profesor. Yo instalé Ollama, configuré el `.env` y el frontend, ejecuté las pruebas y la comparación, y comprobé los resultados (por ejemplo, los 78 tokens de salida y el coste en el CSV).
   - Lo usé también para entender conceptos (`@property`, dónde se crea el `Agente`, para qué sirve `ModeloEco`).
 
-## Preguntas de reflexión de Zadkiel De Jesus
+## Preguntas de reflexión
 
 **1. En el Tema 2 conectaréis un LLM real. ¿Qué clase o clases tendréis que crear y cuáles tendréis que modificar? ¿Por qué?**
 
